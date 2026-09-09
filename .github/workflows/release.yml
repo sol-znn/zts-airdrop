@@ -1,0 +1,159 @@
+# Builds zts-airdrop for every supported OS and attaches the binaries to a
+# GitHub release.
+#
+# Two things about this build are unusual and both come from the same place:
+# the module depends on go-zenon through a `replace` pointing at a sibling
+# directory. So the workflow lays the checkout out the way a developer's disk
+# is laid out — <root>/zts-airdrop next to <root>/go-zenon — rather than
+# rewriting go.mod in CI, which would make the released binary the product of
+# a module graph nobody builds locally.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and release (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  # The go-zenon revision the replace directive resolves to. Pinned rather
+  # than floating on a branch: a released binary should be reproducible, and
+  # a consensus-adjacent dependency that moves under a tag is not.
+  GO_ZENON_REPO: zenon-network/go-zenon
+  GO_ZENON_REF: 590f43ca7a24dccd8e883bc8903a0cb02e54528a
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: zts-airdrop
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.GO_ZENON_REPO }}
+          ref: ${{ env.GO_ZENON_REF }}
+          path: go-zenon
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache-dependency-path: zts-airdrop/go.sum
+      - name: vet
+        working-directory: zts-airdrop
+        run: go vet ./...
+      - name: test
+        working-directory: zts-airdrop
+        # The decimal conversion tests are the ones that matter here: they are
+        # what stands between a released binary and an airdrop that sends a
+        # hundred times the intended amount.
+        run: go test -v ./...
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+          - { goos: windows, goarch: amd64, ext: .exe }
+          # windows/arm64 is deliberately absent: gopkg.in/natefinch/npipe.v2,
+          # which go-zenon's wallet pulls in, has no implementation for it and
+          # fails to compile. Adding the target would only ship a broken job.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: zts-airdrop
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.GO_ZENON_REPO }}
+          ref: ${{ env.GO_ZENON_REF }}
+          path: go-zenon
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache-dependency-path: zts-airdrop/go.sum
+
+      - name: resolve version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "value=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: build
+        working-directory: zts-airdrop
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
+          name="zts-airdrop_${{ steps.version.outputs.value }}_${{ matrix.goos }}_${{ matrix.goarch }}"
+          mkdir -p "dist/$name"
+          # -trimpath keeps local checkout paths out of the binary, and the
+          # static link is what lets one artifact run on any distro.
+          go build -trimpath \
+            -ldflags "-s -w -X main.version=${{ steps.version.outputs.value }}" \
+            -o "dist/$name/zts-airdrop${{ matrix.ext }}" .
+          cp README.md .env.example "dist/$name/"
+          cd dist
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            zip -r "$name.zip" "$name"
+          else
+            tar -czf "$name.tar.gz" "$name"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zts-airdrop_${{ matrix.goos }}_${{ matrix.goarch }}
+          path: |
+            zts-airdrop/dist/*.tar.gz
+            zts-airdrop/dist/*.zip
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: resolve version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "value=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: checksums
+        working-directory: dist
+        # One file covering every artifact, so a download can be verified
+        # without trusting the page it came from.
+        run: sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.version.outputs.value }}" \
+            --title "zts-airdrop ${{ steps.version.outputs.value }}" \
+            --generate-notes \
+            --verify-tag \
+            dist/*

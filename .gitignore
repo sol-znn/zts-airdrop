@@ -1,0 +1,47 @@
+# Secrets. The mnemonic and keystore password live here, so this must stay
+# ignored: a committed .env is a committed key.
+.env
+*.env
+!.env.example
+
+# Key material, under whatever name it was saved with.
+*.keystore
+mnemonic.txt
+phrase.txt
+wallet.json
+
+# The record of who was paid. It is per-run operational state, and it names
+# every recipient of every airdrop, so it does not belong in the history.
+*.jsonl
+airdrop-journal*
+
+# Scan logs. Each one carries the full address list of everybody who
+# transacted in a range, which is chain data but still an operational artefact
+# of a particular run — and on a busy range a single log is megabytes. Keep
+# them, archive them, just do not commit them by accident.
+/scans/
+scan-*.json
+.scan-*.tmp
+
+# Recipient lists written by -out.
+recipients.txt
+addresses.txt
+
+# Build output.
+zts-airdrop
+zts-airdrop.exe
+/dist/
+*.exe
+*.exe~
+*.test
+
+# Go workspace files, which pin local paths that are not portable.
+go.work
+go.work.sum
+
+# Editors and OS noise.
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
